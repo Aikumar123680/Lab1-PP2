@@ -1,5 +1,6 @@
 import psycopg2
 import csv
+import json
 from tabulate import tabulate
 
 conn = psycopg2.connect(host="localhost", dbname="lab-10", user="postgres",
@@ -44,6 +45,37 @@ END;
 $$;
 """)
 
+# === Процедура массовой вставки пользователей ===
+cur.execute("""
+CREATE OR REPLACE PROCEDURE insert_many_users_json(user_json JSON, OUT invalid_entries TEXT[])
+LANGUAGE plpgsql AS $$
+DECLARE
+    user_obj JSON;
+    name TEXT;
+    surname TEXT;
+    phone TEXT;
+BEGIN
+    invalid_entries := '{}';
+    FOR user_obj IN SELECT * FROM json_array_elements(user_json)
+    LOOP
+        name := user_obj->>0;
+        surname := user_obj->>1;
+        phone := user_obj->>2;
+
+        IF phone ~ '^[0-9]{5,15}$' THEN
+            BEGIN
+                CALL insert_or_update_user(name, surname, phone);
+            EXCEPTION WHEN OTHERS THEN
+                invalid_entries := array_append(invalid_entries, name || ' ' || surname);
+            END;
+        ELSE
+            invalid_entries := array_append(invalid_entries, name || ' ' || surname);
+        END IF;
+    END LOOP;
+END;
+$$;
+""")
+
 # === Функция пагинации ===
 cur.execute("""
 CREATE OR REPLACE FUNCTION get_users_paginated(p_limit INT, p_offset INT)
@@ -68,31 +100,6 @@ END;
 $$;
 """)
 
-# === Процедура массовой вставки пользователей ===
-cur.execute("""
-CREATE OR REPLACE FUNCTION insert_many_users(users TEXT[][])
-RETURNS TEXT[] AS $$
-DECLARE
-    user_row TEXT[];
-    wrong_phones TEXT[] := '{}';
-BEGIN
-    FOREACH user_row SLICE 1 IN ARRAY users
-    LOOP
-        IF user_row[2] ~ '^[0-9]{10,15}$' THEN
-            BEGIN
-                CALL insert_or_update_user(user_row[0], user_row[1], user_row[2]);
-            EXCEPTION WHEN OTHERS THEN
-                wrong_phones := array_append(wrong_phones, user_row[0] || ' ' || user_row[1]);
-            END;
-        ELSE
-            wrong_phones := array_append(wrong_phones, user_row[0] || ' ' || user_row[1]);
-        END IF;
-    END LOOP;
-    RETURN wrong_phones;
-END;
-$$ LANGUAGE plpgsql;
-""")
-
 conn.commit()
 
 # === Python функции ===
@@ -110,13 +117,13 @@ def insert_data():
         with open(filepath, 'r') as f:
             reader = csv.reader(f)
             next(reader)
-            user_list = []
-            for row in reader:
-                user_list.append(row)
-            cur.execute("SELECT insert_many_users(%s);", (user_list,))
-            incorrect = cur.fetchone()[0]
-            if incorrect:
-                print("Incorrect entries:", incorrect)
+            user_list = [row for row in reader]
+        cur.execute("CALL insert_many_users_json(%s, %s);", (json.dumps(user_list), None))
+        conn.commit()
+        cur.execute("SELECT insert_many_users_json(%s);", (json.dumps(user_list),))
+        result = cur.fetchone()
+        if result and result[0]:
+            print("Incorrect entries:", result[0])
 
 def update_data():
     column = input('Which column do you want to update? (name/surname/phone): ')
